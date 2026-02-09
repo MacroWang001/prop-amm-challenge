@@ -1,105 +1,122 @@
 # AMM Price Function Challenge
 
-Design custom price functions for an AMM. Your goal: maximize **edge**.
+Design a custom price function for an automated market maker. Your goal: maximize **edge** — the profit your AMM extracts from trading flow.
 
-## Submission
+Your program runs inside a simulation against a benchmark AMM. Retail traders arrive, arbitrageurs keep prices efficient, and an order router splits flow between the two pools based on who offers better prices. The better your pricing, the more flow you attract and the more edge you earn.
 
-Upload a compiled BPF `.so` file to the submission API. Build it with:
+## Quick Start
 
 ```bash
-cargo build-sbf --manifest-path programs/my-strategy/Cargo.toml
-# Upload: programs/my-strategy/target/deploy/my_strategy.so
+# Copy the starter template
+cp -r programs/starter programs/my-strategy
+# Edit programs/my-strategy/Cargo.toml — change the package name
+# Edit programs/my-strategy/src/lib.rs — implement your pricing logic
+
+# Build native + BPF
+prop-amm build programs/my-strategy
+
+# Run 1000 simulations locally (~5s on Apple M3 Pro)
+prop-amm run programs/my-strategy/target/release/libmy_strategy.dylib
+
+# Validate BPF program before submitting
+prop-amm validate programs/my-strategy/target/deploy/my_strategy.so
+
+# Submit the .so file to the API
 ```
 
-Local results may diverge slightly from submission scores due to different RNG seeds. Run more simulations locally (`--simulations 1000`) to reduce variance.
+## How the Simulation Works
 
-## The Simulation
+Each simulation runs **10,000 steps**. At each step:
 
-Each simulation runs 10,000 steps. At each step:
+1. **Fair price moves** via geometric Brownian motion
+2. **Arbitrageurs trade** — they push each AMM's spot price toward the fair price, extracting profit from stale quotes
+3. **Retail orders arrive** — random buy/sell orders, routed optimally across both AMMs
 
-1. **Price moves** — A fair price `p` evolves via geometric Brownian motion
-2. **Arbitrageurs trade** — They push each AMM's spot price toward `p`, extracting profit
-3. **Retail orders arrive** — Random buy/sell orders get routed optimally across AMMs
+Your program competes against a **normalizer AMM** — a constant-product market maker with 30 bps fees. Both start with identical reserves (100 X, 10,000 Y at price 100).
 
-Your program competes against a **normalizer AMM** running a constant-product curve with 30 bps fees. Both AMMs start with identical reserves (100 X, 10,000 Y at price 100).
+### Why the Normalizer Matters
 
-### Price Process
+Without competition, setting 10% fees would appear profitable — huge spreads on the few trades that execute. The normalizer prevents this: if your pricing is too aggressive, retail routes to the 30 bps pool and you get nothing.
 
-The fair price follows GBM: `S(t+1) = S(t) · exp(-σ²/2 + σZ)` where `Z ~ N(0,1)`
+There's no free lunch from slightly undercutting either. The optimal strategy depends on market conditions, trade patterns, and how you manage the tradeoff between spread revenue and adverse selection.
 
-- Drift `μ = 0` (no directional bias)
-- Per-step volatility `σ ~ U[0.088%, 0.101%]` (varies across simulations)
+### Market Parameters
 
-### Retail Flow
+**Price process**: `S(t+1) = S(t) * exp(-sigma^2/2 + sigma*Z)` where `Z ~ N(0,1)`
+- No drift (mu = 0)
+- Per-step volatility varies across simulations: `sigma ~ U[0.088%, 0.101%]`
 
-Uninformed traders arrive via Poisson process:
+**Retail flow**: Poisson arrival, log-normal sizes, 50/50 buy/sell
+- Arrival rate `lambda ~ U[0.6, 1.0]` per step
+- Mean order size `~ U[19, 21]` in Y terms
 
-- Arrival rate `λ ~ U[0.6, 1.0]` orders per step
-- Order size `~ LogNormal(μ, σ=1.2)` with mean `~ U[19, 21]` in Y terms
-- Direction: 50% buy, 50% sell
+**Arbitrage**: Binary search for the optimal trade that pushes spot price to fair price. Efficient — don't try to extract value from informed flow.
 
-Retail flow splits optimally between AMMs based on pricing — better prices attract more volume.
-
-## The Math
-
-### Program Interface
-
-Your program receives **25 bytes of instruction data**:
-
-| Offset | Size | Field        | Type | Description                  |
-|--------|------|--------------|------|------------------------------|
-| 0      | 1    | side         | u8   | 0=buy X (Y input), 1=sell X |
-| 1      | 8    | input_amount | u64  | Input token amount (1e9)     |
-| 9      | 8    | reserve_x    | u64  | Current X reserve (1e9)      |
-| 17     | 8    | reserve_y    | u64  | Current Y reserve (1e9)      |
-
-Return 8 bytes via `sol_set_return_data` — the `output_amount: u64` (1e9 scale).
-
-Programs are stateless. Reserves are passed on each call and updated by the engine after execution.
-
-### Arbitrage
-
-When spot price diverges from fair price `p`, arbitrageurs binary-search for the optimal trade size — the point where marginal profit hits zero. Convexity of the pricing function guarantees convergence.
-
-Higher effective fees mean arbitrageurs need larger mispricings to profit, so your AMM stays "stale" longer — bad for edge. But too-high fees push retail flow to the normalizer.
-
-### Order Routing
-
-Retail orders split optimally across AMMs via grid search over split ratio α ∈ [0, 1]. The router picks the α that maximizes total output for the trader.
-
-Better pricing → more flow. But the relationship is nonlinear — small pricing differences can shift large fractions of volume.
+**Order routing**: Grid search over split ratio alpha in [0, 1]. The router picks the split that maximizes total output. Small pricing differences can shift large fractions of volume.
 
 ### Edge
 
 Edge measures profitability using the fair price at trade time:
 
 ```
-Edge = Σ (amount_y - amount_x × fair_price)   for sells (AMM sells X, gets Y)
-     + Σ (amount_x × fair_price - amount_y)   for buys  (AMM buys X, pays Y)
+For each trade on your AMM:
+  Sell X (AMM receives X, pays Y):  edge = amount_x * fair_price - amount_y
+  Buy X  (AMM receives Y, pays X):  edge = amount_y - amount_x * fair_price
 ```
 
-- **Retail trades**: Positive edge (you profit from the spread)
-- **Arbitrage trades**: Negative edge (you lose to informed flow)
+Retail trades produce positive edge (you profit from the spread). Arbitrage trades produce negative edge (you lose to informed flow). Good strategies maximize the former while minimizing the latter.
 
-Good strategies maximize retail edge while minimizing arb losses.
+## Program Interface
 
-## Why the Normalizer?
+### compute_swap
 
-Without competition, setting 10% fees would appear profitable — you'd capture huge spreads on the few trades that still execute. The normalizer prevents this: if your pricing is too aggressive, retail routes to the 30 bps AMM and you get nothing.
+Your program receives instruction data with reserves and a 1024-byte read-only storage buffer:
 
-The normalizer also means there's no "free lunch" — you can't beat 30 bps just by setting 29 bps. The optimal pricing depends on market conditions.
+| Offset | Size | Field        | Type   | Description                    |
+|--------|------|--------------|--------|--------------------------------|
+| 0      | 1    | side         | u8     | 0=buy X (Y input), 1=sell X   |
+| 1      | 8    | input_amount | u64    | Input token amount (1e9 scale) |
+| 9      | 8    | reserve_x    | u64    | Current X reserve (1e9 scale)  |
+| 17     | 8    | reserve_y    | u64    | Current Y reserve (1e9 scale)  |
+| 25     | 1024 | storage      | [u8]   | Read-only strategy storage     |
+
+Return 8 bytes via `sol_set_return_data` — the `output_amount: u64` (1e9 scale).
+
+### afterSwap (Optional)
+
+After each **real trade** (not during quoting), the engine calls your program with tag byte `2`. This lets you update your 1024-byte storage — useful for strategies that adapt over time (dynamic fees, volatility tracking, etc.).
+
+| Offset | Size | Field         | Type   | Description                    |
+|--------|------|---------------|--------|--------------------------------|
+| 0      | 1    | tag           | u8     | Always 2                       |
+| 1      | 1    | side          | u8     | 0=buy X, 1=sell X              |
+| 2      | 8    | input_amount  | u64    | Input token amount (1e9 scale) |
+| 10     | 8    | output_amount | u64    | Output token amount (1e9 scale)|
+| 18     | 8    | reserve_x     | u64    | Post-trade X reserve           |
+| 26     | 8    | reserve_y     | u64    | Post-trade Y reserve           |
+| 34     | 1024 | storage       | [u8]   | Current storage (read/write)   |
+
+To persist updated storage, call the `sol_set_storage` syscall with your modified buffer. If you don't call it, storage remains unchanged. The starter program's afterSwap is a no-op — storage is entirely optional.
+
+**When afterSwap is called:**
+- After arbitrageur executes a trade
+- After router executes routed trades
+
+**When it is NOT called:**
+- During router quoting (grid search for optimal split)
+- During arbitrageur quoting (binary search for optimal size)
+
+### Requirements
+
+| Requirement   | Description                                                        |
+|---------------|--------------------------------------------------------------------|
+| **Convex**    | Marginal price must worsen with trade size. Non-convex programs are rejected. |
+| **Monotonic** | Larger input must produce larger output.                           |
+| **< 100k CU** | Must execute within the compute unit limit.                       |
 
 ## Writing a Program
 
-**Start with `programs/starter/`** — a constant-product AMM with 50 bps fees:
-
-```bash
-cp -r programs/starter programs/my-strategy
-# Edit programs/my-strategy/Cargo.toml — change the package name
-# Edit programs/my-strategy/src/lib.rs — change the swap logic
-```
-
-The starter implements `compute_swap` — pure math that takes instruction data and returns an output amount. The pinocchio entrypoint and FFI export are boilerplate:
+Start with `programs/starter/` — a constant-product AMM with 50 bps fees. The key pieces:
 
 ```rust
 use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramResult};
@@ -110,18 +127,24 @@ entrypoint!(process_instruction);
 pub fn process_instruction(
     _program_id: &Pubkey, _accounts: &[AccountInfo], instruction_data: &[u8],
 ) -> ProgramResult {
-    let output = compute_swap(instruction_data);
-    unsafe { pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8); }
+    match instruction_data[0] {
+        0 | 1 => {  // compute_swap
+            let output = compute_swap(instruction_data);
+            unsafe { pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8); }
+        }
+        2 => {      // afterSwap — update storage here if needed
+        }
+        _ => {}
+    }
     Ok(())
 }
 
-/// This is where your logic goes.
 pub fn compute_swap(data: &[u8]) -> u64 {
-    // Decode inputs
     let side = data[0];
     let input = u64::from_le_bytes(data[1..9].try_into().unwrap()) as u128;
     let rx = u64::from_le_bytes(data[9..17].try_into().unwrap()) as u128;
     let ry = u64::from_le_bytes(data[17..25].try_into().unwrap()) as u128;
+    // Storage available at data[25..1049] if needed
 
     // Your pricing logic here...
     todo!()
@@ -133,16 +156,16 @@ pub fn compute_swap(data: &[u8]) -> u64 {
 pub unsafe extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
     compute_swap(core::slice::from_raw_parts(data, len))
 }
+
+/// Optional: afterSwap hook for native mode.
+#[cfg(not(target_os = "solana"))]
+#[no_mangle]
+pub unsafe extern "C" fn after_swap_ffi(
+    _data: *const u8, _data_len: usize, _storage: *mut u8, _storage_len: usize,
+) {
+    // Update storage here if needed
+}
 ```
-
-### Requirements
-
-| Requirement | Description |
-|-------------|-------------|
-| **Convex** | Marginal price must worsen with trade size. Non-convex programs are rejected. |
-| **Monotonic** | Larger input must produce larger output. |
-| **Stateless** | Reserves are passed each call. No state between calls. |
-| **< 100k CU** | Must execute within the compute unit limit. |
 
 ### Tips
 
@@ -150,21 +173,44 @@ pub unsafe extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
 - Test convexity with `prop-amm validate` before running simulations
 - Think about how your marginal price schedule affects the routing split
 - The arbitrageur is efficient — don't try to extract value from informed flow
+- Storage is zero-initialized at the start of each simulation and persists across all trades within a simulation
 
 ## CLI
 
 ```bash
-# Build everything (native + BPF)
+# Build native + BPF
 prop-amm build programs/my-strategy
 
-# Run 1000 simulations (~10 seconds)
-prop-amm run programs/my-strategy/target/release/libmy_strategy.dylib
+# Run simulations (default: 1000 sims, 10k steps each)
+prop-amm run <path-to-native-lib>
 
-# Quick test
-prop-amm run programs/my-strategy/target/release/libmy_strategy.dylib --simulations 10
+# Fewer sims for quick iteration
+prop-amm run <path-to-native-lib> --simulations 10
 
-# Validate BPF program (convexity, monotonicity, CU)
-prop-amm validate programs/my-strategy/target/deploy/my_strategy.so
+# Validate BPF program
+prop-amm validate <path-to-bpf.so>
 ```
 
-Output is your average edge across simulations. The 30 bps normalizer typically scores around 250-350 edge per simulation depending on market conditions.
+The 30 bps normalizer typically scores around 250-350 edge per simulation.
+
+## Performance
+
+Simulations run natively via `dlopen` — your Rust code executes directly, no BPF interpreter overhead. BPF is only used for the submission `.so` file validation.
+
+| Workload                  | Time           | Platform         |
+|---------------------------|----------------|------------------|
+| 1,000 sims / 10k steps   | ~5s            | Apple M3 Pro, 12 cores |
+| Single sim / 10k steps   | ~5ms           | Native execution |
+
+The engine parallelizes across simulations using up to 8 worker threads by default.
+
+## Submission
+
+Build your BPF `.so` and upload it to the submission API:
+
+```bash
+cargo build-sbf --manifest-path programs/my-strategy/Cargo.toml
+# Upload: programs/my-strategy/target/deploy/my_strategy.so
+```
+
+Local results may diverge slightly from submission scores due to different RNG seeds and hyperparameter variance. Run more simulations locally to reduce variance.
