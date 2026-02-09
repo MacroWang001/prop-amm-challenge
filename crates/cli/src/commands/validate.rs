@@ -1,4 +1,5 @@
 use prop_amm_executor::{BpfExecutor, BpfProgram};
+use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
 
 pub fn run(so_path: &str) -> anyhow::Result<()> {
@@ -11,19 +12,20 @@ pub fn run(so_path: &str) -> anyhow::Result<()> {
     println!("  [PASS] ELF loaded and verified");
 
     let mut executor = BpfExecutor::new(program);
+    let storage = [0u8; STORAGE_SIZE];
 
     // Basic execution test
     let rx = f64_to_nano(100.0);
     let ry = f64_to_nano(10000.0);
 
-    let buy_output = executor.execute(0, f64_to_nano(10.0), rx, ry)
+    let buy_output = executor.execute(0, f64_to_nano(10.0), rx, ry, &storage)
         .map_err(|e| anyhow::anyhow!("Buy execution failed: {}", e))?;
     if buy_output == 0 {
         anyhow::bail!("FAIL: Buy X returned zero output");
     }
     println!("  [PASS] Buy X: input_y=10.0 -> output_x={:.6}", nano_to_f64(buy_output));
 
-    let sell_output = executor.execute(1, f64_to_nano(1.0), rx, ry)
+    let sell_output = executor.execute(1, f64_to_nano(1.0), rx, ry, &storage)
         .map_err(|e| anyhow::anyhow!("Sell execution failed: {}", e))?;
     if sell_output == 0 {
         anyhow::bail!("FAIL: Sell X returned zero output");
@@ -37,7 +39,7 @@ pub fn run(so_path: &str) -> anyhow::Result<()> {
     // Buy side monotonicity
     let mut prev_output = 0u64;
     for &size in &trade_sizes {
-        let output = executor.execute(0, f64_to_nano(size), rx, ry)
+        let output = executor.execute(0, f64_to_nano(size), rx, ry, &storage)
             .map_err(|e| anyhow::anyhow!("Execution failed at size {}: {}", size, e))?;
         if output <= prev_output && prev_output > 0 {
             anyhow::bail!(
@@ -52,7 +54,7 @@ pub fn run(so_path: &str) -> anyhow::Result<()> {
     // Sell side monotonicity
     prev_output = 0;
     for &size in &trade_sizes {
-        let output = executor.execute(1, f64_to_nano(size), rx, ry)
+        let output = executor.execute(1, f64_to_nano(size), rx, ry, &storage)
             .map_err(|e| anyhow::anyhow!("Execution failed at size {}: {}", size, e))?;
         if output <= prev_output && prev_output > 0 {
             anyhow::bail!(
@@ -71,8 +73,8 @@ pub fn run(so_path: &str) -> anyhow::Result<()> {
     // Buy side convexity: marginal X output per Y input should decrease
     let mut prev_marginal = f64::MAX;
     for &size in &trade_sizes {
-        let out_lo = nano_to_f64(executor.execute(0, f64_to_nano(size), rx, ry)?);
-        let out_hi = nano_to_f64(executor.execute(0, f64_to_nano(size + eps), rx, ry)?);
+        let out_lo = nano_to_f64(executor.execute(0, f64_to_nano(size), rx, ry, &storage)?);
+        let out_hi = nano_to_f64(executor.execute(0, f64_to_nano(size + eps), rx, ry, &storage)?);
         let marginal = (out_hi - out_lo) / eps;
 
         if marginal > prev_marginal + 1e-9 {
@@ -88,8 +90,8 @@ pub fn run(so_path: &str) -> anyhow::Result<()> {
     // Sell side convexity: marginal Y output per X input should decrease
     prev_marginal = f64::MAX;
     for &size in &trade_sizes {
-        let out_lo = nano_to_f64(executor.execute(1, f64_to_nano(size), rx, ry)?);
-        let out_hi = nano_to_f64(executor.execute(1, f64_to_nano(size + eps), rx, ry)?);
+        let out_lo = nano_to_f64(executor.execute(1, f64_to_nano(size), rx, ry, &storage)?);
+        let out_hi = nano_to_f64(executor.execute(1, f64_to_nano(size + eps), rx, ry, &storage)?);
         let marginal = (out_hi - out_lo) / eps;
 
         if marginal > prev_marginal + 1e-9 {

@@ -1,5 +1,6 @@
 use std::time::Instant;
 use prop_amm_executor::{BpfExecutor, BpfProgram, NativeExecutor};
+use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::f64_to_nano;
 use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
 
@@ -9,15 +10,16 @@ const NORMALIZER_SO: &[u8] =
 pub fn run_profile() {
     let program = BpfProgram::load(NORMALIZER_SO).expect("load");
     let mut bpf_exec = BpfExecutor::new(program.clone());
-    let native_exec = NativeExecutor::new(normalizer_swap);
+    let native_exec = NativeExecutor::new(normalizer_swap, None);
 
     let rx = f64_to_nano(100.0);
     let ry = f64_to_nano(10000.0);
     let amount = f64_to_nano(10.0);
+    let storage = [0u8; STORAGE_SIZE];
 
     // Warmup
     for _ in 0..100 {
-        let _ = bpf_exec.execute(0, amount, rx, ry);
+        let _ = bpf_exec.execute(0, amount, rx, ry, &storage);
     }
 
     let n = 10_000;
@@ -25,7 +27,7 @@ pub fn run_profile() {
     // BPF benchmark
     let start = Instant::now();
     for _ in 0..n {
-        let _ = bpf_exec.execute(0, amount, rx, ry);
+        let _ = bpf_exec.execute(0, amount, rx, ry, &storage);
     }
     let bpf_elapsed = start.elapsed();
     let bpf_us = bpf_elapsed.as_micros() as f64 / n as f64;
@@ -35,7 +37,7 @@ pub fn run_profile() {
     // Native benchmark
     let start = Instant::now();
     for _ in 0..n {
-        let _ = native_exec.execute(0, amount, rx, ry);
+        let _ = native_exec.execute(0, amount, rx, ry, &storage);
     }
     let native_elapsed = start.elapsed();
     let native_us = native_elapsed.as_nanos() as f64 / n as f64 / 1000.0;
@@ -58,13 +60,13 @@ pub fn run_profile() {
 
     // Native sim
     let start = Instant::now();
-    let _ = crate::engine::run_simulation_native(normalizer_swap, normalizer_swap, &config);
+    let _ = crate::engine::run_simulation_native(normalizer_swap, None, normalizer_swap, None, &config);
     let native_sim = start.elapsed();
 
     // Mixed sim (BPF submission + native normalizer)
     let p1 = BpfProgram::load(NORMALIZER_SO).expect("load");
     let start = Instant::now();
-    let _ = crate::engine::run_simulation_mixed(p1, normalizer_swap, &config);
+    let _ = crate::engine::run_simulation_mixed(p1, normalizer_swap, None, &config);
     let mixed_sim = start.elapsed();
 
     println!("\n=== 1k-step Sim Benchmark ===");

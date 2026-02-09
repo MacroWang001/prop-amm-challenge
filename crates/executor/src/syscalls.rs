@@ -5,9 +5,13 @@ use solana_rbpf::{
     vm::ContextObject,
 };
 
+use prop_amm_shared::instruction::STORAGE_SIZE;
+
 pub struct SyscallContext {
     pub return_data: [u8; 8],
     pub has_return_data: bool,
+    pub storage_data: Vec<u8>,
+    pub has_storage_update: bool,
     remaining: u64,
 }
 
@@ -16,6 +20,8 @@ impl SyscallContext {
         Self {
             return_data: [0u8; 8],
             has_return_data: false,
+            storage_data: vec![0u8; STORAGE_SIZE],
+            has_storage_update: false,
             remaining,
         }
     }
@@ -94,5 +100,40 @@ declare_builtin_function!(
         _memory_mapping: &mut MemoryMapping,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         Err("program aborted".into())
+    }
+);
+
+declare_builtin_function!(
+    /// BPF program calls this to write updated storage after afterSwap.
+    /// arg1 = vm address of data, arg2 = length (must be <= STORAGE_SIZE)
+    SyscallSetStorage,
+    fn rust(
+        context_object: &mut SyscallContext,
+        addr: u64,
+        len: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        if len > STORAGE_SIZE as u64 {
+            return Err(Box::new(EbpfError::AccessViolation(
+                AccessType::Load,
+                addr,
+                len,
+                "input",
+            )));
+        }
+        let host_addr: Result<u64, EbpfError> =
+            memory_mapping.map(AccessType::Load, addr, len).into();
+        let host_addr = host_addr?;
+        let slice = unsafe { std::slice::from_raw_parts(host_addr as *const u8, len as usize) };
+        context_object.storage_data[..len as usize].copy_from_slice(slice);
+        // Zero remaining bytes if partial write
+        if (len as usize) < STORAGE_SIZE {
+            context_object.storage_data[len as usize..].fill(0);
+        }
+        context_object.has_storage_update = true;
+        Ok(0)
     }
 );

@@ -1,4 +1,4 @@
-use prop_amm_executor::{BpfProgram, SwapFn};
+use prop_amm_executor::{AfterSwapFn, BpfProgram, SwapFn};
 use prop_amm_shared::config::SimulationConfig;
 use prop_amm_shared::result::SimResult;
 
@@ -76,11 +76,13 @@ pub fn run_simulation(
 /// Run simulation with native swap functions (fast, for production)
 pub fn run_simulation_native(
     submission_fn: SwapFn,
+    submission_after_swap: Option<AfterSwapFn>,
     normalizer_fn: SwapFn,
+    normalizer_after_swap: Option<AfterSwapFn>,
     config: &SimulationConfig,
 ) -> anyhow::Result<SimResult> {
-    let amm_sub = BpfAmm::new_native(submission_fn, config.initial_x, config.initial_y, "submission".to_string());
-    let amm_norm = BpfAmm::new_native(normalizer_fn, config.initial_x, config.initial_y, "normalizer".to_string());
+    let amm_sub = BpfAmm::new_native(submission_fn, submission_after_swap, config.initial_x, config.initial_y, "submission".to_string());
+    let amm_norm = BpfAmm::new_native(normalizer_fn, normalizer_after_swap, config.initial_x, config.initial_y, "normalizer".to_string());
     run_sim_inner(amm_sub, amm_norm, config)
 }
 
@@ -88,9 +90,10 @@ pub fn run_simulation_native(
 pub fn run_simulation_mixed(
     submission_program: BpfProgram,
     normalizer_fn: SwapFn,
+    normalizer_after_swap: Option<AfterSwapFn>,
     config: &SimulationConfig,
 ) -> anyhow::Result<SimResult> {
     let amm_sub = BpfAmm::new(submission_program, config.initial_x, config.initial_y, "submission".to_string());
-    let amm_norm = BpfAmm::new_native(normalizer_fn, config.initial_x, config.initial_y, "normalizer".to_string());
+    let amm_norm = BpfAmm::new_native(normalizer_fn, normalizer_after_swap, config.initial_x, config.initial_y, "normalizer".to_string());
     run_sim_inner(amm_sub, amm_norm, config)
 }

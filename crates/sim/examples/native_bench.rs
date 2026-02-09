@@ -23,7 +23,9 @@ fn main() {
     let start = Instant::now();
     let result = runner::run_default_batch_native(
         starter_swap,
+        None,
         normalizer_swap,
+        None,
         1000,
         10_000,
         None,

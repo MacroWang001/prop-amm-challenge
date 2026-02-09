@@ -11,10 +11,23 @@ pub fn process_instruction(
     _accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    let output = compute_swap(instruction_data);
-    unsafe {
-        pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8);
+    if instruction_data.is_empty() {
+        return Ok(());
     }
+
+    match instruction_data[0] {
+        // tag 0 or 1 = compute_swap (side)
+        0 | 1 => {
+            let output = compute_swap(instruction_data);
+            unsafe {
+                pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8);
+            }
+        }
+        // tag 2 = after_swap (no-op for normalizer)
+        2 => {}
+        _ => {}
+    }
+
     Ok(())
 }
 

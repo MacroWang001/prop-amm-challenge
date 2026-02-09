@@ -7,7 +7,7 @@ use solana_rbpf::{
     vm::Config,
 };
 
-use crate::syscalls::{SyscallAbort, SyscallContext, SyscallLog, SyscallSetReturnData};
+use crate::syscalls::{SyscallAbort, SyscallContext, SyscallLog, SyscallSetReturnData, SyscallSetStorage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ExecutorError {
@@ -45,6 +45,9 @@ impl BpfProgram {
             .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
         function_registry
             .register_function_hashed(*b"abort", SyscallAbort::vm)
+            .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
+        function_registry
+            .register_function_hashed(*b"sol_set_storage", SyscallSetStorage::vm)
             .map_err(|e| ExecutorError::ElfLoad(e.to_string()))?;
 
         let loader = Arc::new(BuiltinProgram::new_loader(

@@ -11,10 +11,25 @@ pub fn process_instruction(
     _accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> ProgramResult {
-    let output = compute_swap(instruction_data);
-    unsafe {
-        pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8);
+    if instruction_data.is_empty() {
+        return Ok(());
     }
+
+    match instruction_data[0] {
+        // tag 0 or 1 = compute_swap (side)
+        0 | 1 => {
+            let output = compute_swap(instruction_data);
+            unsafe {
+                pinocchio::syscalls::sol_set_return_data(output.to_le_bytes().as_ptr(), 8);
+            }
+        }
+        // tag 2 = after_swap (no-op for starter)
+        2 => {
+            // No storage updates needed for basic CFMM
+        }
+        _ => {}
+    }
+
     Ok(())
 }
 
@@ -62,4 +77,11 @@ pub fn compute_swap(data: &[u8]) -> u64 {
 #[no_mangle]
 pub unsafe extern "C" fn compute_swap_ffi(data: *const u8, len: usize) -> u64 {
     compute_swap(core::slice::from_raw_parts(data, len))
+}
+
+/// FFI export for after_swap hook (no-op for starter)
+#[cfg(not(target_os = "solana"))]
+#[no_mangle]
+pub unsafe extern "C" fn after_swap_ffi(_data: *const u8, _data_len: usize, _storage: *mut u8, _storage_len: usize) {
+    // No-op: starter doesn't use storage
 }

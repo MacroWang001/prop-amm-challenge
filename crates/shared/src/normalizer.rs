@@ -1,5 +1,5 @@
 /// Native normalizer swap function (30bp CFMM).
-/// Takes 25-byte instruction data, returns output amount.
+/// Takes instruction data (25+ bytes, extra storage bytes ignored), returns output amount.
 pub fn compute_swap(data: &[u8]) -> u64 {
     if data.len() < 25 {
         return 0;
@@ -35,4 +35,9 @@ pub fn compute_swap(data: &[u8]) -> u64 {
         }
         _ => 0,
     }
+}
+
+/// Native normalizer after_swap hook (no-op).
+pub fn after_swap(_data: &[u8], _storage: &mut [u8]) {
+    // No-op: normalizer doesn't use storage
 }

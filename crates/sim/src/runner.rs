@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use prop_amm_executor::{BpfProgram, SwapFn};
+use prop_amm_executor::{AfterSwapFn, BpfProgram, SwapFn};
 use prop_amm_shared::config::{HyperparameterVariance, SimulationConfig};
 use prop_amm_shared::result::{BatchResult, SimResult};
 
@@ -32,7 +32,9 @@ pub fn run_batch(
 
 pub fn run_batch_native(
     submission_fn: SwapFn,
+    submission_after_swap: Option<AfterSwapFn>,
     normalizer_fn: SwapFn,
+    normalizer_after_swap: Option<AfterSwapFn>,
     configs: Vec<SimulationConfig>,
     n_workers: Option<usize>,
 ) -> anyhow::Result<BatchResult> {
@@ -43,7 +45,7 @@ pub fn run_batch_native(
     let results: Result<Vec<SimResult>, _> = pool.install(|| {
         configs
             .par_iter()
-            .map(|config| engine::run_simulation_native(submission_fn, normalizer_fn, config))
+            .map(|config| engine::run_simulation_native(submission_fn, submission_after_swap, normalizer_fn, normalizer_after_swap, config))
             .collect()
     });
 
@@ -67,6 +69,7 @@ pub fn run_default_batch(
 pub fn run_default_batch_mixed(
     submission_program: BpfProgram,
     normalizer_fn: SwapFn,
+    normalizer_after_swap: Option<AfterSwapFn>,
     n_sims: u32,
     n_steps: u32,
     n_workers: Option<usize>,
@@ -85,7 +88,7 @@ pub fn run_default_batch_mixed(
             .par_iter()
             .map(|config| {
                 let sub = submission_program.clone();
-                engine::run_simulation_mixed(sub, normalizer_fn, config)
+                engine::run_simulation_mixed(sub, normalizer_fn, normalizer_after_swap, config)
             })
             .collect()
     });
@@ -95,7 +98,9 @@ pub fn run_default_batch_mixed(
 
 pub fn run_default_batch_native(
     submission_fn: SwapFn,
+    submission_after_swap: Option<AfterSwapFn>,
     normalizer_fn: SwapFn,
+    normalizer_after_swap: Option<AfterSwapFn>,
     n_sims: u32,
     n_steps: u32,
     n_workers: Option<usize>,
@@ -104,5 +109,5 @@ pub fn run_default_batch_native(
     let mut base = SimulationConfig::default();
     base.n_steps = n_steps;
     let configs: Vec<_> = (0..n_sims).map(|i| variance.apply(&base, i as u64)).collect();
-    run_batch_native(submission_fn, normalizer_fn, configs, n_workers)
+    run_batch_native(submission_fn, submission_after_swap, normalizer_fn, normalizer_after_swap, configs, n_workers)
 }
