@@ -14,18 +14,18 @@ struct Cli {
 enum Commands {
     /// Build program (native for simulation, BPF for submission)
     Build {
-        /// Path to the program crate directory
-        path: String,
+        /// Path to the .rs source file
+        file: String,
     },
-    /// Validate a BPF .so program (convexity, monotonicity, CU)
+    /// Validate a program (convexity, monotonicity, CU)
     Validate {
-        /// Path to the compiled BPF .so file
-        so_path: String,
+        /// Path to the .rs source file
+        file: String,
     },
     /// Run simulation batch
     Run {
-        /// Path to the program crate directory
-        path: String,
+        /// Path to the .rs source file
+        file: String,
         /// Number of simulations
         #[arg(long, default_value = "1000")]
         simulations: u32,
@@ -45,14 +45,14 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Build { path } => commands::build::run(&path),
-        Commands::Validate { so_path } => commands::validate::run(&so_path),
+        Commands::Build { file } => commands::build::run(&file),
+        Commands::Validate { file } => commands::validate::run(&file),
         Commands::Run {
-            path,
+            file,
             simulations,
             steps,
             workers,
             bpf,
-        } => commands::run::run(&path, simulations, steps, workers, bpf),
+        } => commands::run::run(&file, simulations, steps, workers, bpf),
     }
 }

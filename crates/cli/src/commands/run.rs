@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use prop_amm_executor::{AfterSwapFn, BpfProgram};
@@ -7,6 +6,7 @@ use prop_amm_shared::normalizer::{
 };
 use prop_amm_sim::runner;
 
+use super::compile;
 use crate::output;
 
 type FfiSwapFn = unsafe extern "C" fn(*const u8, usize) -> u64;
@@ -28,7 +28,7 @@ fn dynamic_after_swap(data: &[u8], storage: &mut [u8]) {
 }
 
 pub fn run(
-    crate_path: &str,
+    file: &str,
     simulations: u32,
     steps: u32,
     workers: usize,
@@ -37,19 +37,20 @@ pub fn run(
     let n_workers = if workers == 0 { None } else { Some(workers) };
 
     if bpf {
-        run_bpf(crate_path, simulations, steps, n_workers)
+        run_bpf(file, simulations, steps, n_workers)
     } else {
-        run_native(crate_path, simulations, steps, n_workers)
+        run_native(file, simulations, steps, n_workers)
     }
 }
 
 fn run_native(
-    crate_path: &str,
+    file: &str,
     simulations: u32,
     steps: u32,
     n_workers: Option<usize>,
 ) -> anyhow::Result<()> {
-    let native_path = find_native_lib(crate_path)?;
+    println!("Compiling {} (native)...", file);
+    let native_path = compile::compile_native(file)?;
 
     // Load the native library — leak it so symbols remain valid for the process lifetime.
     let lib = Box::new(
@@ -98,12 +99,14 @@ fn run_native(
 }
 
 fn run_bpf(
-    crate_path: &str,
+    file: &str,
     simulations: u32,
     steps: u32,
     n_workers: Option<usize>,
 ) -> anyhow::Result<()> {
-    let bpf_path = find_bpf_so(crate_path)?;
+    println!("Compiling {} (BPF)...", file);
+    let bpf_path = compile::compile_bpf(file)?;
+
     let bytes = std::fs::read(&bpf_path)
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", bpf_path.display(), e))?;
     let submission_program = BpfProgram::load(&bytes)
@@ -133,52 +136,4 @@ fn run_bpf(
 
     output::print_results(&result, elapsed);
     Ok(())
-}
-
-fn find_native_lib(crate_path: &str) -> anyhow::Result<std::path::PathBuf> {
-    let base = Path::new(crate_path);
-    let release_dir = base.join("target").join("release");
-    let ext = if cfg!(target_os = "macos") {
-        "dylib"
-    } else {
-        "so"
-    };
-
-    // Look for lib*.dylib / lib*.so in target/release/
-    if let Ok(entries) = std::fs::read_dir(&release_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with("lib") && name.ends_with(ext) {
-                return Ok(entry.path());
-            }
-        }
-    }
-
-    anyhow::bail!(
-        "No native library found in {}/target/release/. Run `prop-amm build {}` first.",
-        crate_path,
-        crate_path,
-    )
-}
-
-fn find_bpf_so(crate_path: &str) -> anyhow::Result<std::path::PathBuf> {
-    let base = Path::new(crate_path);
-    let deploy_dir = base.join("target").join("deploy");
-
-    if let Ok(entries) = std::fs::read_dir(&deploy_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.ends_with(".so") {
-                return Ok(entry.path());
-            }
-        }
-    }
-
-    anyhow::bail!(
-        "No BPF .so found in {}/target/deploy/. Run `prop-amm build {}` first.",
-        crate_path,
-        crate_path,
-    )
 }
