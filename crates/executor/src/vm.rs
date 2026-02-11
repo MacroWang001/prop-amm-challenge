@@ -21,6 +21,7 @@ pub struct BpfExecutor {
     input_buf: Vec<u8>,
     stack: AlignedMemory<{ ebpf::HOST_ALIGN }>,
     heap: AlignedMemory<{ ebpf::HOST_ALIGN }>,
+    context: SyscallContext,
 }
 
 impl BpfExecutor {
@@ -33,17 +34,16 @@ impl BpfExecutor {
             heap: AlignedMemory::zero_filled(32 * 1024),
             program,
             input_buf,
+            context: SyscallContext::new(100_000),
         }
     }
 
-    fn run_vm(&mut self, instr_data_len: usize) -> Result<SyscallContext, ExecutorError> {
+    fn run_vm(&mut self, instr_data_len: usize) -> Result<(), ExecutorError> {
         // Write instruction data length
         self.input_buf[8..16].copy_from_slice(&(instr_data_len as u64).to_le_bytes());
 
-        // Zero the stack for each call
-        self.stack.as_slice_mut().fill(0);
-        // Zero heap to prevent hidden cross-call state in unsafe BPF code.
-        self.heap.as_slice_mut().fill(0);
+        // Reset context flags without reallocating storage Vec.
+        self.context.reset(100_000);
 
         let executable = self.program.executable();
         let loader = self.program.loader();
@@ -61,12 +61,10 @@ impl BpfExecutor {
         let memory_mapping = MemoryMapping::new(regions, config, sbpf_version)
             .map_err(|e| ExecutorError::Execution(e.to_string()))?;
 
-        let mut context = SyscallContext::new(100_000);
-
         let mut vm = EbpfVm::new(
             loader.clone(),
             sbpf_version,
-            &mut context,
+            &mut self.context,
             memory_mapping,
             stack_len,
         );
@@ -77,7 +75,7 @@ impl BpfExecutor {
         let result: Result<u64, _> = result.into();
         result.map_err(|e| ExecutorError::Execution(e.to_string()))?;
 
-        Ok(context)
+        Ok(())
     }
 
     pub fn execute(
@@ -101,13 +99,13 @@ impl BpfExecutor {
             self.input_buf[41 + copy_len..41 + STORAGE_SIZE].fill(0);
         }
 
-        let context = self.run_vm(SWAP_INSTRUCTION_SIZE)?;
+        self.run_vm(SWAP_INSTRUCTION_SIZE)?;
 
-        if !context.has_return_data {
+        if !self.context.has_return_data {
             return Err(ExecutorError::NoReturnData);
         }
 
-        Ok(u64::from_le_bytes(context.return_data))
+        Ok(u64::from_le_bytes(self.context.return_data))
     }
 
     pub fn execute_after_swap(
@@ -137,11 +135,11 @@ impl BpfExecutor {
             self.input_buf[58 + copy_len..58 + STORAGE_SIZE].fill(0);
         }
 
-        let context = self.run_vm(AFTER_SWAP_SIZE)?;
+        self.run_vm(AFTER_SWAP_SIZE)?;
 
-        if context.has_storage_update {
+        if self.context.has_storage_update {
             let out_len = storage.len().min(STORAGE_SIZE);
-            storage[..out_len].copy_from_slice(&context.storage_data[..out_len]);
+            storage[..out_len].copy_from_slice(&self.context.storage_data[..out_len]);
         }
 
         Ok(())
