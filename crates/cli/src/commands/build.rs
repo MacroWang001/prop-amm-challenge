@@ -63,10 +63,10 @@ pub fn run(path: &str) -> anyhow::Result<()> {
     }
 
     println!("\nRun locally:");
-    if !native_path.is_empty() {
-        println!("  prop-amm run {}", native_path);
-    }
+    println!("  prop-amm run {}", path);
     if !bpf_path.is_empty() {
+        println!("\nRun via BPF:");
+        println!("  prop-amm run {} --bpf", path);
         println!("\nSubmit to API:");
         println!("  Upload {}", bpf_path);
     }

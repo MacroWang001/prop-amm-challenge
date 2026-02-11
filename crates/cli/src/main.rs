@@ -22,10 +22,10 @@ enum Commands {
         /// Path to the compiled BPF .so file
         so_path: String,
     },
-    /// Run simulation batch (BPF submission runtime)
+    /// Run simulation batch
     Run {
-        /// Path to submission program artifact (BPF .so preferred; native lib accepted to locate companion BPF)
-        lib_path: String,
+        /// Path to the program crate directory
+        path: String,
         /// Number of simulations
         #[arg(long, default_value = "1000")]
         simulations: u32,
@@ -35,6 +35,9 @@ enum Commands {
         /// Number of parallel workers (0 = auto)
         #[arg(long, default_value = "0")]
         workers: usize,
+        /// Use BPF runtime instead of native (slower, for validation)
+        #[arg(long)]
+        bpf: bool,
     },
 }
 
@@ -45,10 +48,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Build { path } => commands::build::run(&path),
         Commands::Validate { so_path } => commands::validate::run(&so_path),
         Commands::Run {
-            lib_path,
+            path,
             simulations,
             steps,
             workers,
-        } => commands::run::run(&lib_path, simulations, steps, workers),
+            bpf,
+        } => commands::run::run(&path, simulations, steps, workers, bpf),
     }
 }
