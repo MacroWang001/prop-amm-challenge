@@ -214,4 +214,9 @@ impl BpfAmm {
         self.reserve_y = reserve_y;
         self.storage.fill(0);
     }
+
+    #[inline]
+    pub fn uses_bpf_backend(&self) -> bool {
+        matches!(self.backend, Backend::Bpf(_))
+    }
 }
