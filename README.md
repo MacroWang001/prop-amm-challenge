@@ -211,7 +211,7 @@ Normalizer performance varies materially across sampled fee/liquidity regimes, s
 
 By default, `prop-amm run` compiles your program as a **native shared library** and runs it directly. This is fast enough for rapid iteration — 1,000 simulations complete in seconds.
 
-BPF mode (`--bpf`) runs your program through the Solana BPF interpreter, which is **~100x slower**. Use it only as a final check before submitting to verify your program compiles and behaves correctly under the BPF runtime. Don't use it for day-to-day development.
+BPF mode (`--bpf`) runs your program through the Solana BPF interpreter, which is **~100x slower**. Use it only as a final check before submitting to verify your program compiles and behaves correctly under the BPF runtime. Don't use it for day-to-day development. Run just a few simulations (`--simulations 5`) to sanity-check — running 1,000 sims in BPF mode will take ~15 minutes and isn't worth it for validation.
 
 ```bash
 # Fast iteration (native, default)
