@@ -379,7 +379,7 @@ impl OrderRouter {
             } else {
                 slope
             };
-            let slope_rounding_tol = ref_slope * 5e-4 + 8.0 / din;
+            let slope_rounding_tol = ref_slope * 1e-3 + 12.0 / din;
             if slope > prev_slope + slope_rounding_tol {
                 return false;
             }
