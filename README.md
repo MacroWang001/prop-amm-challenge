@@ -1,4 +1,4 @@
-# AMM Price Function Challenge
+# Prop AMM Challenge
 
 Design a custom price function for an automated market maker. Your goal: maximize **edge** — the profit your AMM extracts from trading flow.
 
