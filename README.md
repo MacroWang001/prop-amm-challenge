@@ -22,6 +22,9 @@ cp programs/starter/src/lib.rs my_amm.rs
 # Edit your pricing logic
 edit my_amm.rs
 
+# Validate interface + shape + parity checks before benchmarking/submitting
+prop-amm validate my_amm.rs
+
 # Run 1000 simulations locally (~5s on Apple M3 Pro)
 prop-amm run my_amm.rs
 
@@ -120,11 +123,20 @@ To persist updated storage, call `prop_amm_submission_sdk::set_storage` with you
 - During router quoting (golden-section search for optimal split)
 - During arbitrageur quoting (golden-section search for optimal size)
 
+### Metadata Queries
+
+The runner may request strategy metadata via instruction tag:
+- `3`: return `NAME` bytes
+- `4`: return `get_model_used()` bytes
+
+Use `"None"` for `MODEL_USED` when the submission is fully human-written.
+
 ### Requirements
 
 | Requirement   | Description                                                        |
 |---------------|--------------------------------------------------------------------|
 | **NAME**      | Must define `const NAME: &str = "...";` — shown on the leaderboard. |
+| **MODEL_USED**| Must define model metadata and expose `get_model_used() -> &'static str`. Use `"None"` if fully human-written. |
 | **Safe Rust** | `unsafe` code is rejected. Keep your submission fully safe Rust.   |
 | **Monotonic** | Larger input must produce larger output.                           |
 | **Concave**   | Output must be concave in input (diminishing returns per unit).    |
@@ -140,6 +152,7 @@ use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64};
 
 /// Required: displayed on the leaderboard.
 const NAME: &str = "My Strategy";
+const MODEL_USED: &str = "GPT-5.3-Codex"; // Use "None" for human-written submissions.
 
 const STORAGE_SIZE: usize = 1024;
 
@@ -170,9 +183,14 @@ pub fn process_instruction(
         2 => {      // afterSwap — update storage here if needed
         }
         3 => set_return_data_bytes(NAME.as_bytes()),
+        4 => set_return_data_bytes(get_model_used().as_bytes()),
         _ => {}
     }
     Ok(())
+}
+
+pub fn get_model_used() -> &'static str {
+    MODEL_USED
 }
 
 pub fn compute_swap(data: &[u8]) -> u64 {
@@ -227,6 +245,8 @@ prop-amm build my_amm.rs
 # Validate monotonicity, concavity, and native/BPF parity
 prop-amm validate my_amm.rs
 ```
+
+Always run `prop-amm validate` before large benchmarks and before submission.
 
 Normalizer performance varies materially across sampled fee/liquidity regimes, so benchmark edge distribution is wider than in a fixed-fee setting.
 

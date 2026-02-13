@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
+use anyhow::Context;
 use prop_amm_executor::{AfterSwapFn, BpfExecutor, BpfProgram};
 use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
@@ -8,6 +9,7 @@ use prop_amm_shared::normalizer::{
     after_swap as normalizer_after_swap, compute_swap as normalizer_swap,
 };
 use prop_amm_sim::runner;
+use syn::{Expr, Item, Lit, Type};
 
 use super::compile;
 
@@ -43,6 +45,14 @@ fn dynamic_after_swap(data: &[u8], storage: &mut [u8]) {
 }
 
 pub fn run(file: &str) -> anyhow::Result<()> {
+    let metadata = validate_submission_metadata(file)?;
+    println!("  [PASS] Name: {}", metadata.name);
+    if metadata.model_used == "None" {
+        println!("  [PASS] Model used: None (human-written)");
+    } else {
+        println!("  [PASS] Model used: {}", metadata.model_used);
+    }
+
     println!("Compiling {} (BPF)...", file);
     let so_path = compile::compile_bpf(file)?;
     println!("Compiling {} (native)...", file);
@@ -299,4 +309,83 @@ fn mix(mut z: u64) -> u64 {
     z ^= z >> 27;
     z = z.wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
+}
+
+struct SubmissionMetadata {
+    name: String,
+    model_used: String,
+}
+
+fn validate_submission_metadata(file: &str) -> anyhow::Result<SubmissionMetadata> {
+    let source = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("Failed to read {} for metadata checks: {}", file, e))?;
+    let parsed = syn::parse_file(&source)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {} for metadata checks: {}", file, e))?;
+
+    let mut name: Option<String> = None;
+    let mut model_used: Option<String> = None;
+    let mut has_get_model_used = false;
+
+    for item in parsed.items {
+        match item {
+            Item::Const(item_const) => {
+                let ident = item_const.ident.to_string();
+                if ident == "NAME" {
+                    name = extract_str_const(&item_const.ty, &item_const.expr)
+                        .context("`NAME` must be a string literal constant")?;
+                } else if ident == "MODEL_USED" {
+                    model_used = extract_str_const(&item_const.ty, &item_const.expr)
+                        .context("`MODEL_USED` must be a string literal constant")?;
+                }
+            }
+            Item::Fn(item_fn) => {
+                if item_fn.sig.ident == "get_model_used" {
+                    has_get_model_used = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let name = name
+        .ok_or_else(|| anyhow::anyhow!("Submission must define `const NAME: &str = \"...\";`"))?;
+    if name.trim().is_empty() {
+        anyhow::bail!("`NAME` must not be empty");
+    }
+
+    let model_used = model_used.ok_or_else(|| {
+        anyhow::anyhow!("Submission must define `const MODEL_USED: &str = \"...\";`")
+    })?;
+    if model_used.trim().is_empty() {
+        anyhow::bail!(
+            "`MODEL_USED` must not be empty. Use \"None\" for human-written submissions."
+        );
+    }
+
+    if !has_get_model_used {
+        anyhow::bail!("Submission must define `fn get_model_used() -> &'static str`");
+    }
+
+    Ok(SubmissionMetadata { name, model_used })
+}
+
+fn extract_str_const(ty: &Type, expr: &Expr) -> anyhow::Result<Option<String>> {
+    let is_str_ref = match ty {
+        Type::Reference(r) => match &*r.elem {
+            Type::Path(p) => p.path.is_ident("str"),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !is_str_ref {
+        return Ok(None);
+    }
+
+    match expr {
+        Expr::Lit(expr_lit) => match &expr_lit.lit {
+            Lit::Str(s) => Ok(Some(s.value())),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }
