@@ -35,6 +35,12 @@ enum Commands {
         /// Number of parallel workers (0 = auto)
         #[arg(long, default_value = "0")]
         workers: usize,
+        /// Starting seed for simulation config generation
+        #[arg(long, default_value = "0")]
+        seed_start: u64,
+        /// Seed step between simulations
+        #[arg(long, default_value = "1")]
+        seed_stride: u64,
         /// Use BPF runtime instead of native (slower, for validation)
         #[arg(long)]
         bpf: bool,
@@ -56,8 +62,19 @@ fn main() -> anyhow::Result<()> {
             simulations,
             steps,
             workers,
+            seed_start,
+            seed_stride,
             bpf,
             bpf_so,
-        } => commands::run::run(&file, simulations, steps, workers, bpf, bpf_so.as_deref()),
+        } => commands::run::run(
+            &file,
+            simulations,
+            steps,
+            workers,
+            seed_start,
+            seed_stride,
+            bpf,
+            bpf_so.as_deref(),
+        ),
     }
 }

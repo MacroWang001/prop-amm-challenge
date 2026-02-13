@@ -1,10 +1,33 @@
 use prop_amm_shared::result::BatchResult;
 use std::time::Duration;
 
-pub fn print_results(result: &BatchResult, elapsed: Duration) {
+pub struct RunTimings {
+    pub compile_or_load: Duration,
+    pub simulation: Duration,
+    pub total: Duration,
+}
+
+pub fn print_results(result: &BatchResult, timings: RunTimings) {
+    let seed_range = result
+        .results
+        .iter()
+        .map(|r| r.seed)
+        .fold(None::<(u64, u64)>, |acc, seed| match acc {
+            Some((lo, hi)) => Some((lo.min(seed), hi.max(seed))),
+            None => Some((seed, seed)),
+        });
+
     println!("\n========================================");
     println!("  Simulations: {}", result.n_sims());
-    println!("  Time:        {:.2}s", elapsed.as_secs_f64());
+    if let Some((seed_start, seed_end)) = seed_range {
+        println!("  Seed range:  {}..={}", seed_start, seed_end);
+    }
+    println!(
+        "  Compile/load:{:>8.2}s",
+        timings.compile_or_load.as_secs_f64()
+    );
+    println!("  Simulation:  {:>8.2}s", timings.simulation.as_secs_f64());
+    println!("  Total:       {:>8.2}s", timings.total.as_secs_f64());
     println!("  Avg edge:    {:.2}", result.avg_edge());
     println!("  Total edge:  {:.2}", result.total_edge);
     println!("========================================");

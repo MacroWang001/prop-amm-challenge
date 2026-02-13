@@ -2,6 +2,7 @@ use pinocchio::{account_info::AccountInfo, entrypoint, pubkey::Pubkey, ProgramRe
 use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64};
 
 const NAME: &str = "My Strategy";
+const MODEL_USED: &str = "GPT-5.3-Codex"; // Use "None" for fully human-written submissions.
 const FEE_NUMERATOR: u128 = 950;
 const FEE_DENOMINATOR: u128 = 1000;
 const STORAGE_SIZE: usize = 1024;
@@ -39,10 +40,16 @@ pub fn process_instruction(
         }
         // tag 3 = get_name (for leaderboard display)
         3 => set_return_data_bytes(NAME.as_bytes()),
+        // tag 4 = get_model_used (for metadata display)
+        4 => set_return_data_bytes(get_model_used().as_bytes()),
         _ => {}
     }
 
     Ok(())
+}
+
+pub fn get_model_used() -> &'static str {
+    MODEL_USED
 }
 
 pub fn compute_swap(data: &[u8]) -> u64 {

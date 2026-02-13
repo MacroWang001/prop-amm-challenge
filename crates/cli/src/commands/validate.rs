@@ -1,12 +1,62 @@
-use prop_amm_executor::{BpfExecutor, BpfProgram};
+use std::path::Path;
+use std::sync::atomic::{AtomicPtr, Ordering};
+
+use anyhow::Context;
+use prop_amm_executor::{AfterSwapFn, BpfExecutor, BpfProgram};
 use prop_amm_shared::instruction::STORAGE_SIZE;
 use prop_amm_shared::nano::{f64_to_nano, nano_to_f64};
+use prop_amm_shared::normalizer::{
+    after_swap as normalizer_after_swap, compute_swap as normalizer_swap,
+};
+use prop_amm_sim::runner;
+use syn::{Expr, Item, Lit, Type};
 
 use super::compile;
 
+type FfiSwapFn = unsafe extern "C" fn(*const u8, usize) -> u64;
+type FfiAfterSwapFn = unsafe extern "C" fn(*const u8, usize, *mut u8, usize);
+
+static LOADED_SWAP: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+static LOADED_AFTER_SWAP: AtomicPtr<()> = AtomicPtr::new(std::ptr::null_mut());
+
+const PARITY_SIMS: u32 = 12;
+const PARITY_STEPS: u32 = 2_000;
+const PARITY_SEED_START: u64 = 9_001;
+const PARITY_SEED_STRIDE: u64 = 7;
+const PARITY_ABS_TOL: f64 = 1e-6;
+
+fn dynamic_swap(data: &[u8]) -> u64 {
+    let ptr = LOADED_SWAP.load(Ordering::Relaxed);
+    let f: FfiSwapFn = unsafe { std::mem::transmute(ptr) };
+    unsafe { f(data.as_ptr(), data.len()) }
+}
+
+fn dynamic_after_swap(data: &[u8], storage: &mut [u8]) {
+    let ptr = LOADED_AFTER_SWAP.load(Ordering::Relaxed);
+    let f: FfiAfterSwapFn = unsafe { std::mem::transmute(ptr) };
+    unsafe {
+        f(
+            data.as_ptr(),
+            data.len(),
+            storage.as_mut_ptr(),
+            storage.len(),
+        )
+    }
+}
+
 pub fn run(file: &str) -> anyhow::Result<()> {
+    let metadata = validate_submission_metadata(file)?;
+    println!("  [PASS] Name: {}", metadata.name);
+    if metadata.model_used == "None" {
+        println!("  [PASS] Model used: None (human-written)");
+    } else {
+        println!("  [PASS] Model used: {}", metadata.model_used);
+    }
+
     println!("Compiling {} (BPF)...", file);
     let so_path = compile::compile_bpf(file)?;
+    println!("Compiling {} (native)...", file);
+    let native_path = compile::compile_native(file)?;
 
     println!("Validating program: {}", so_path.display());
 
@@ -16,6 +66,7 @@ pub fn run(file: &str) -> anyhow::Result<()> {
         BpfProgram::load(&elf_bytes).map_err(|e| anyhow::anyhow!("Failed to load ELF: {}", e))?;
     println!("  [PASS] ELF loaded and verified");
 
+    let parity_program = program.clone();
     let mut executor = BpfExecutor::new(program);
     let storage = [0u8; STORAGE_SIZE];
 
@@ -85,11 +136,11 @@ pub fn run(file: &str) -> anyhow::Result<()> {
     }
     println!("  [PASS] Sell side monotonicity");
 
-    // Convexity check: marginal price must worsen with size
-    println!("  Checking convexity...");
+    // Concavity check: marginal output per additional input must not increase.
+    println!("  Checking concavity...");
     let eps = 0.001;
 
-    // Buy side convexity: marginal X output per Y input should decrease
+    // Buy side concavity: marginal X output per Y input should decrease.
     let mut prev_marginal = f64::MAX;
     for &size in &trade_sizes {
         let out_lo = nano_to_f64(executor.execute(0, f64_to_nano(size), rx, ry, &storage)?);
@@ -98,7 +149,7 @@ pub fn run(file: &str) -> anyhow::Result<()> {
 
         if marginal > prev_marginal + 1e-9 {
             anyhow::bail!(
-                "FAIL: Convexity violation (buy side). At size={}, marginal={:.9} > prev={:.9}",
+                "FAIL: Concavity violation (buy side). At size={}, marginal={:.9} > prev={:.9}",
                 size,
                 marginal,
                 prev_marginal
@@ -106,9 +157,9 @@ pub fn run(file: &str) -> anyhow::Result<()> {
         }
         prev_marginal = marginal;
     }
-    println!("  [PASS] Buy side convexity");
+    println!("  [PASS] Buy side concavity");
 
-    // Sell side convexity: marginal Y output per X input should decrease
+    // Sell side concavity: marginal Y output per X input should decrease.
     prev_marginal = f64::MAX;
     for &size in &trade_sizes {
         let out_lo = nano_to_f64(executor.execute(1, f64_to_nano(size), rx, ry, &storage)?);
@@ -117,7 +168,7 @@ pub fn run(file: &str) -> anyhow::Result<()> {
 
         if marginal > prev_marginal + 1e-9 {
             anyhow::bail!(
-                "FAIL: Convexity violation (sell side). At size={}, marginal={:.9} > prev={:.9}",
+                "FAIL: Concavity violation (sell side). At size={}, marginal={:.9} > prev={:.9}",
                 size,
                 marginal,
                 prev_marginal
@@ -125,7 +176,7 @@ pub fn run(file: &str) -> anyhow::Result<()> {
         }
         prev_marginal = marginal;
     }
-    println!("  [PASS] Sell side convexity");
+    println!("  [PASS] Sell side concavity");
 
     // Randomized behavioral checks over varied reserve/storage states
     println!("  Checking randomized reserve/storage states...");
@@ -151,8 +202,104 @@ pub fn run(file: &str) -> anyhow::Result<()> {
     }
     println!("  [PASS] Randomized reserve/storage checks");
 
+    run_native_bpf_parity_check(parity_program, &native_path)?;
+
     println!("\nAll validation checks passed!");
     Ok(())
+}
+
+fn run_native_bpf_parity_check(program: BpfProgram, native_path: &Path) -> anyhow::Result<()> {
+    println!(
+        "  Checking native/BPF parity ({} sims, {} steps, seeds {} + i*{})...",
+        PARITY_SIMS, PARITY_STEPS, PARITY_SEED_START, PARITY_SEED_STRIDE
+    );
+
+    let submission_after_swap = load_native_submission(native_path)?;
+
+    let native = runner::run_default_batch_native_seeded(
+        dynamic_swap,
+        submission_after_swap,
+        normalizer_swap,
+        Some(normalizer_after_swap),
+        PARITY_SIMS,
+        PARITY_STEPS,
+        Some(4),
+        PARITY_SEED_START,
+        PARITY_SEED_STRIDE,
+    )?;
+    let bpf = runner::run_default_batch_mixed_seeded(
+        program,
+        normalizer_swap,
+        Some(normalizer_after_swap),
+        PARITY_SIMS,
+        PARITY_STEPS,
+        Some(4),
+        PARITY_SEED_START,
+        PARITY_SEED_STRIDE,
+    )?;
+
+    let total_delta = (native.total_edge - bpf.total_edge).abs();
+    let avg_delta = (native.avg_edge() - bpf.avg_edge()).abs();
+
+    println!(
+        "    native_total={:.9} bpf_total={:.9} delta={:.9} tol={:.9}",
+        native.total_edge, bpf.total_edge, total_delta, PARITY_ABS_TOL
+    );
+    println!(
+        "    native_avg={:.9} bpf_avg={:.9} delta={:.9} tol={:.9}",
+        native.avg_edge(),
+        bpf.avg_edge(),
+        avg_delta,
+        PARITY_ABS_TOL
+    );
+
+    if total_delta > PARITY_ABS_TOL || avg_delta > PARITY_ABS_TOL {
+        anyhow::bail!(
+            "FAIL: Native/BPF parity check failed. avg_delta={:.9}, total_delta={:.9}, tol={:.9}",
+            avg_delta,
+            total_delta,
+            PARITY_ABS_TOL
+        );
+    }
+
+    println!("  [PASS] Native/BPF parity");
+    Ok(())
+}
+
+fn load_native_submission(native_path: &Path) -> anyhow::Result<Option<AfterSwapFn>> {
+    let lib = Box::new(
+        unsafe { libloading::Library::new(native_path) }.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to load native library {}: {}",
+                native_path.display(),
+                e
+            )
+        })?,
+    );
+    let lib = Box::leak(lib);
+
+    let swap_fn: libloading::Symbol<FfiSwapFn> = unsafe {
+        lib.get(compile::NATIVE_SWAP_SYMBOL)
+            .or_else(|_| lib.get(b"compute_swap_ffi"))
+    }
+    .map_err(|e| anyhow::anyhow!("Missing native swap symbol: {}", e))?;
+    LOADED_SWAP.store(*swap_fn as *mut (), Ordering::Relaxed);
+
+    let has_after_swap = if let Ok(after_fn) = unsafe {
+        lib.get::<FfiAfterSwapFn>(compile::NATIVE_AFTER_SWAP_SYMBOL)
+            .or_else(|_| lib.get::<FfiAfterSwapFn>(b"after_swap_ffi"))
+    } {
+        LOADED_AFTER_SWAP.store(*after_fn as *mut (), Ordering::Relaxed);
+        true
+    } else {
+        false
+    };
+
+    Ok(if has_after_swap {
+        Some(dynamic_after_swap)
+    } else {
+        None
+    })
 }
 
 #[inline]
@@ -162,4 +309,83 @@ fn mix(mut z: u64) -> u64 {
     z ^= z >> 27;
     z = z.wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
+}
+
+struct SubmissionMetadata {
+    name: String,
+    model_used: String,
+}
+
+fn validate_submission_metadata(file: &str) -> anyhow::Result<SubmissionMetadata> {
+    let source = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("Failed to read {} for metadata checks: {}", file, e))?;
+    let parsed = syn::parse_file(&source)
+        .map_err(|e| anyhow::anyhow!("Failed to parse {} for metadata checks: {}", file, e))?;
+
+    let mut name: Option<String> = None;
+    let mut model_used: Option<String> = None;
+    let mut has_get_model_used = false;
+
+    for item in parsed.items {
+        match item {
+            Item::Const(item_const) => {
+                let ident = item_const.ident.to_string();
+                if ident == "NAME" {
+                    name = extract_str_const(&item_const.ty, &item_const.expr)
+                        .context("`NAME` must be a string literal constant")?;
+                } else if ident == "MODEL_USED" {
+                    model_used = extract_str_const(&item_const.ty, &item_const.expr)
+                        .context("`MODEL_USED` must be a string literal constant")?;
+                }
+            }
+            Item::Fn(item_fn) => {
+                if item_fn.sig.ident == "get_model_used" {
+                    has_get_model_used = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let name = name
+        .ok_or_else(|| anyhow::anyhow!("Submission must define `const NAME: &str = \"...\";`"))?;
+    if name.trim().is_empty() {
+        anyhow::bail!("`NAME` must not be empty");
+    }
+
+    let model_used = model_used.ok_or_else(|| {
+        anyhow::anyhow!("Submission must define `const MODEL_USED: &str = \"...\";`")
+    })?;
+    if model_used.trim().is_empty() {
+        anyhow::bail!(
+            "`MODEL_USED` must not be empty. Use \"None\" for human-written submissions."
+        );
+    }
+
+    if !has_get_model_used {
+        anyhow::bail!("Submission must define `fn get_model_used() -> &'static str`");
+    }
+
+    Ok(SubmissionMetadata { name, model_used })
+}
+
+fn extract_str_const(ty: &Type, expr: &Expr) -> anyhow::Result<Option<String>> {
+    let is_str_ref = match ty {
+        Type::Reference(r) => match &*r.elem {
+            Type::Path(p) => p.path.is_ident("str"),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !is_str_ref {
+        return Ok(None);
+    }
+
+    match expr {
+        Expr::Lit(expr_lit) => match &expr_lit.lit {
+            Lit::Str(s) => Ok(Some(s.value())),
+            _ => Ok(None),
+        },
+        _ => Ok(None),
+    }
 }

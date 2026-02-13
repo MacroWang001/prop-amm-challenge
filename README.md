@@ -22,6 +22,9 @@ cp programs/starter/src/lib.rs my_amm.rs
 # Edit your pricing logic
 edit my_amm.rs
 
+# Validate interface + shape + parity checks before benchmarking/submitting
+prop-amm validate my_amm.rs
+
 # Run 1000 simulations locally (~5s on Apple M3 Pro)
 prop-amm run my_amm.rs
 
@@ -120,11 +123,20 @@ To persist updated storage, call `prop_amm_submission_sdk::set_storage` with you
 - During router quoting (golden-section search for optimal split)
 - During arbitrageur quoting (golden-section search for optimal size)
 
+### Metadata Queries
+
+The runner may request strategy metadata via instruction tag:
+- `3`: return `NAME` bytes
+- `4`: return `get_model_used()` bytes
+
+Use `"None"` for `MODEL_USED` when the submission is fully human-written.
+
 ### Requirements
 
 | Requirement   | Description                                                        |
 |---------------|--------------------------------------------------------------------|
 | **NAME**      | Must define `const NAME: &str = "...";` — shown on the leaderboard. |
+| **MODEL_USED**| Must define model metadata and expose `get_model_used() -> &'static str`. Use `"None"` if fully human-written. |
 | **Safe Rust** | `unsafe` code is rejected. Keep your submission fully safe Rust.   |
 | **Monotonic** | Larger input must produce larger output.                           |
 | **Concave**   | Output must be concave in input (diminishing returns per unit).    |
@@ -140,6 +152,7 @@ use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64};
 
 /// Required: displayed on the leaderboard.
 const NAME: &str = "My Strategy";
+const MODEL_USED: &str = "GPT-5.3-Codex"; // Use "None" for human-written submissions.
 
 const STORAGE_SIZE: usize = 1024;
 
@@ -170,9 +183,14 @@ pub fn process_instruction(
         2 => {      // afterSwap — update storage here if needed
         }
         3 => set_return_data_bytes(NAME.as_bytes()),
+        4 => set_return_data_bytes(get_model_used().as_bytes()),
         _ => {}
     }
     Ok(())
+}
+
+pub fn get_model_used() -> &'static str {
+    MODEL_USED
 }
 
 pub fn compute_swap(data: &[u8]) -> u64 {
@@ -202,7 +220,7 @@ For local native runs, the CLI auto-generates adapter exports. You only need str
 
 - Use `u128` intermediates to avoid overflow (reserves at 1e9 scale can multiply to ~1e24)
 - Prefer typed decode with `wincode::deserialize` for swap/afterSwap payloads
-- Test convexity with `prop-amm validate` before running simulations
+- Test concavity with `prop-amm validate` before running simulations
 - Think about how your marginal price schedule affects the routing split
 - The arbitrageur is efficient — don't try to extract value from informed flow
 - Storage is zero-initialized at the start of each simulation and persists across all trades within a simulation
@@ -215,15 +233,20 @@ The CLI compiles and runs your `.rs` source file directly — no manual build st
 # Run simulations (default: 1000 sims, 10k steps each)
 prop-amm run my_amm.rs
 
+# Run the same workload on a custom seed range
+prop-amm run my_amm.rs --seed-start 100000 --seed-stride 1
+
 # Fewer sims for quick iteration
 prop-amm run my_amm.rs --simulations 10
 
 # Build only (native + BPF artifacts)
 prop-amm build my_amm.rs
 
-# Validate convexity and monotonicity
+# Validate monotonicity, concavity, and native/BPF parity
 prop-amm validate my_amm.rs
 ```
+
+Always run `prop-amm validate` before large benchmarks and before submission.
 
 Normalizer performance varies materially across sampled fee/liquidity regimes, so benchmark edge distribution is wider than in a fixed-fee setting.
 
@@ -243,6 +266,13 @@ prop-amm run my_amm.rs --bpf --simulations 10
 
 The engine parallelizes across simulations using up to 8 worker threads (configurable with `--workers`).
 
+### Reproducibility and Seeds
+
+- Local CLI runs are deterministic for a given config.
+- By default, `prop-amm run` uses simulation seeds `0..n_sims-1`.
+- Use `--seed-start` and `--seed-stride` to run out-of-sample seed blocks locally.
+- The server uses a different evaluation seed schedule, so local and server scores can differ slightly even for the same strategy.
+
 | Workload                  | Time           | Platform         |
 |---------------------------|----------------|------------------|
 | 1,000 sims / 10k steps   | ~5s            | Apple M3 Pro, native |
@@ -252,7 +282,12 @@ The engine parallelizes across simulations using up to 8 worker threads (configu
 
 Submit your `lib.rs` source code through the web UI. The server handles compilation, validation, and simulation — you don't need any toolchain beyond what's needed for local testing.
 
-The server validates your program (monotonicity, convexity), then runs 1,000 simulations against the normalizer. Local results may diverge slightly from submission scores due to different RNG seeds and hyperparameter variance.
+The server validates your program (monotonicity and concavity), then runs 1,000 simulations against the normalizer. Local results may diverge slightly from submission scores due to different RNG seeds and hyperparameter variance.
+
+High-level evaluation invariants:
+- The server evaluates each submission on 1,000 simulations.
+- Evaluation uses a fixed checker configuration per server release.
+- Exact holdout seeds are not published.
 
 ### Restrictions
 

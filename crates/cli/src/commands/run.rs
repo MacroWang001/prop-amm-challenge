@@ -39,15 +39,28 @@ pub fn run(
     simulations: u32,
     steps: u32,
     workers: usize,
+    seed_start: u64,
+    seed_stride: u64,
     bpf: bool,
     bpf_so: Option<&str>,
 ) -> anyhow::Result<()> {
+    if seed_stride == 0 {
+        anyhow::bail!("--seed-stride must be >= 1");
+    }
     let n_workers = if workers == 0 { None } else { Some(workers) };
 
     if bpf {
-        run_bpf(file, simulations, steps, n_workers, bpf_so)
+        run_bpf(
+            file,
+            simulations,
+            steps,
+            n_workers,
+            bpf_so,
+            seed_start,
+            seed_stride,
+        )
     } else {
-        run_native(file, simulations, steps, n_workers)
+        run_native(file, simulations, steps, n_workers, seed_start, seed_stride)
     }
 }
 
@@ -56,11 +69,17 @@ fn run_native(
     simulations: u32,
     steps: u32,
     n_workers: Option<usize>,
+    seed_start: u64,
+    seed_stride: u64,
 ) -> anyhow::Result<()> {
+    let total_start = std::time::Instant::now();
     println!("Compiling {} (native)...", file);
+    let build_start = std::time::Instant::now();
     let native_path = compile::compile_native(file)?;
+    let build_elapsed = build_start.elapsed();
 
     // Load the native library — leak it so symbols remain valid for the process lifetime.
+    let load_start = std::time::Instant::now();
     let lib = Box::new(
         unsafe { libloading::Library::new(&native_path) }
             .map_err(|e| anyhow::anyhow!("Failed to load {}: {}", native_path.display(), e))?,
@@ -89,14 +108,15 @@ fn run_native(
     } else {
         None
     };
+    let compile_or_load_elapsed = build_elapsed + load_start.elapsed();
 
     println!(
-        "Running {} simulations ({} steps each) natively...",
-        simulations, steps,
+        "Running {} simulations ({} steps each) natively with seeds {} + i*{}...",
+        simulations, steps, seed_start, seed_stride,
     );
 
-    let start = std::time::Instant::now();
-    let result = runner::run_default_batch_native(
+    let sim_start = std::time::Instant::now();
+    let result = runner::run_default_batch_native_seeded(
         dynamic_swap,
         submission_after_swap,
         normalizer_swap,
@@ -104,10 +124,19 @@ fn run_native(
         simulations,
         steps,
         n_workers,
+        seed_start,
+        seed_stride,
     )?;
-    let elapsed = start.elapsed();
+    let sim_elapsed = sim_start.elapsed();
 
-    output::print_results(&result, elapsed);
+    output::print_results(
+        &result,
+        output::RunTimings {
+            compile_or_load: compile_or_load_elapsed,
+            simulation: sim_elapsed,
+            total: total_start.elapsed(),
+        },
+    );
     Ok(())
 }
 
@@ -117,7 +146,11 @@ fn run_bpf(
     steps: u32,
     n_workers: Option<usize>,
     bpf_so: Option<&str>,
+    seed_start: u64,
+    seed_stride: u64,
 ) -> anyhow::Result<()> {
+    let total_start = std::time::Instant::now();
+    let build_or_load_start = std::time::Instant::now();
     let bpf_path = if let Some(path) = bpf_so {
         println!("Using prebuilt BPF .so: {}", path);
         std::path::PathBuf::from(path)
@@ -130,11 +163,12 @@ fn run_bpf(
         .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", bpf_path.display(), e))?;
     let submission_program = BpfProgram::load(&bytes)
         .map_err(|e| anyhow::anyhow!("Failed to load BPF program: {}", e))?;
+    let compile_or_load_elapsed = build_or_load_start.elapsed();
 
     let meter_disabled = std::env::var_os("PROP_AMM_BPF_DISABLE_METER").is_some();
 
     println!(
-        "Running {} simulations ({} steps each) via BPF{}{}...",
+        "Running {} simulations ({} steps each) via BPF{}{} with seeds {} + i*{}...",
         simulations,
         steps,
         if submission_program.jit_available() {
@@ -143,19 +177,30 @@ fn run_bpf(
             " (interpreter)"
         },
         if meter_disabled { " (no meter)" } else { "" },
+        seed_start,
+        seed_stride,
     );
 
-    let start = std::time::Instant::now();
-    let result = runner::run_default_batch_mixed(
+    let sim_start = std::time::Instant::now();
+    let result = runner::run_default_batch_mixed_seeded(
         submission_program,
         normalizer_swap,
         Some(normalizer_after_swap_fn),
         simulations,
         steps,
         n_workers,
+        seed_start,
+        seed_stride,
     )?;
-    let elapsed = start.elapsed();
+    let sim_elapsed = sim_start.elapsed();
 
-    output::print_results(&result, elapsed);
+    output::print_results(
+        &result,
+        output::RunTimings {
+            compile_or_load: compile_or_load_elapsed,
+            simulation: sim_elapsed,
+            total: total_start.elapsed(),
+        },
+    );
     Ok(())
 }
