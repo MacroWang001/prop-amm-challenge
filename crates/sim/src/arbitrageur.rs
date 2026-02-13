@@ -15,6 +15,19 @@ const BRACKET_MAX_STEPS: usize = 24;
 const BRACKET_GROWTH: f64 = 2.0;
 const MAX_INPUT_AMOUNT: f64 = (u64::MAX as f64 / NANO_SCALE_F64) * 0.999_999;
 
+#[derive(Clone, Copy)]
+enum ArbSide {
+    BuyX,
+    SellX,
+}
+
+#[derive(Clone, Copy)]
+struct ArbCandidate {
+    side: ArbSide,
+    input_amount: f64,
+    expected_profit: f64,
+}
+
 pub struct ArbResult {
     pub amm_buys_x: bool,
     pub amount_x: f64,
@@ -45,36 +58,38 @@ impl Arbitrageur {
     }
 
     pub fn execute_arb(&mut self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbResult> {
-        let spot = amm.spot_price();
-        if !spot.is_finite() || !fair_price.is_finite() || fair_price <= 0.0 {
+        if !fair_price.is_finite() || fair_price <= 0.0 {
             return None;
         }
 
-        // The normalizer is a known constant-product-with-fee curve. Arb it with a closed-form
-        // solution to avoid dozens of quote calls per step.
-        if amm.name == "normalizer" {
-            return self.execute_normalizer_closed_form(amm, fair_price, spot);
-        }
-
-        if spot < fair_price * 0.9999 {
-            self.arb_buy_x(amm, fair_price)
-        } else if spot > fair_price * 1.0001 {
-            self.arb_sell_x(amm, fair_price)
+        let best = if amm.name == "normalizer" {
+            // The normalizer is a known constant-product-with-fee curve. Keep it closed-form,
+            // but evaluate both sides and execute whichever quote-implied trade is better.
+            Self::best_candidate(
+                self.plan_normalizer_buy_x(amm, fair_price),
+                self.plan_normalizer_sell_x(amm, fair_price),
+            )
         } else {
-            None
-        }
+            // Evaluate both book sides from compute_swap quotes; reserve_y/reserve_x can be a
+            // misleading directional signal for non-CP strategies.
+            let start_y = self.sample_retail_size_y().min(MAX_INPUT_AMOUNT);
+            let start_x = (start_y / fair_price.max(1e-9))
+                .max(MIN_INPUT)
+                .min(MAX_INPUT_AMOUNT);
+            Self::best_candidate(
+                self.plan_arb_buy_x(amm, fair_price, start_y),
+                self.plan_arb_sell_x(amm, fair_price, start_x),
+            )
+        }?;
+
+        self.execute_candidate(amm, fair_price, best)
     }
 
     fn sample_retail_size_y(&mut self) -> f64 {
         self.retail_size_dist.sample(&mut self.rng).max(MIN_INPUT)
     }
 
-    fn execute_normalizer_closed_form(
-        &mut self,
-        amm: &mut BpfAmm,
-        fair_price: f64,
-        spot: f64,
-    ) -> Option<ArbResult> {
+    fn plan_normalizer_buy_x(&self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbCandidate> {
         debug_assert_eq!(amm.name, "normalizer");
 
         let fee_bps = Self::normalizer_fee_bps(amm) as f64;
@@ -89,12 +104,11 @@ impl Arbitrageur {
             return None;
         }
 
-        if spot < fair_price * 0.9999 {
-            // Buy X with Y
-            let target = (fair_price * rx * gamma * ry).sqrt();
-            if !target.is_finite() || target <= ry {
-                return None;
-            }
+        // Buy X with Y
+        let target = (fair_price * rx * gamma * ry).sqrt();
+        if !target.is_finite() || target <= ry {
+            None
+        } else {
             let input_y = ((target - ry) / gamma).clamp(MIN_INPUT, MAX_INPUT_AMOUNT);
             let expected_output_x = amm.quote_buy_x(input_y);
             if expected_output_x <= 0.0 {
@@ -104,22 +118,34 @@ impl Arbitrageur {
             if arb_profit < self.min_arb_profit {
                 return None;
             }
-            let output_x = amm.execute_buy_x(input_y);
-            if output_x <= 0.0 {
-                return None;
-            }
-            Some(ArbResult {
-                amm_buys_x: false,
-                amount_x: output_x,
-                amount_y: input_y,
-                edge: input_y - output_x * fair_price,
+            Some(ArbCandidate {
+                side: ArbSide::BuyX,
+                input_amount: input_y,
+                expected_profit: arb_profit,
             })
-        } else if spot > fair_price * 1.0001 {
-            // Sell X for Y
-            let target = (ry * rx * gamma / fair_price).sqrt();
-            if !target.is_finite() || target <= rx {
-                return None;
-            }
+        }
+    }
+
+    fn plan_normalizer_sell_x(&self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbCandidate> {
+        debug_assert_eq!(amm.name, "normalizer");
+
+        let fee_bps = Self::normalizer_fee_bps(amm) as f64;
+        let gamma = (10_000.0 - fee_bps) / 10_000.0;
+        if !gamma.is_finite() || gamma <= 0.0 {
+            return None;
+        }
+
+        let rx = amm.reserve_x;
+        let ry = amm.reserve_y;
+        if !rx.is_finite() || !ry.is_finite() || rx <= 0.0 || ry <= 0.0 {
+            return None;
+        }
+
+        // Sell X for Y
+        let target = (ry * rx * gamma / fair_price).sqrt();
+        if !target.is_finite() || target <= rx {
+            None
+        } else {
             let input_x = ((target - rx) / gamma).clamp(MIN_INPUT, MAX_INPUT_AMOUNT);
             let expected_output_y = amm.quote_sell_x(input_x);
             if expected_output_y <= 0.0 {
@@ -129,18 +155,11 @@ impl Arbitrageur {
             if arb_profit < self.min_arb_profit {
                 return None;
             }
-            let output_y = amm.execute_sell_x(input_x);
-            if output_y <= 0.0 {
-                return None;
-            }
-            Some(ArbResult {
-                amm_buys_x: true,
-                amount_x: input_x,
-                amount_y: output_y,
-                edge: input_x * fair_price - output_y,
+            Some(ArbCandidate {
+                side: ArbSide::SellX,
+                input_amount: input_x,
+                expected_profit: arb_profit,
             })
-        } else {
-            None
         }
     }
 
@@ -160,8 +179,12 @@ impl Arbitrageur {
         }
     }
 
-    fn arb_buy_x(&mut self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbResult> {
-        let start_y = self.sample_retail_size_y().min(MAX_INPUT_AMOUNT);
+    fn plan_arb_buy_x(
+        &mut self,
+        amm: &mut BpfAmm,
+        fair_price: f64,
+        start_y: f64,
+    ) -> Option<ArbCandidate> {
         let mut sampled_curve = Vec::with_capacity(BRACKET_MAX_STEPS + GOLDEN_MAX_ITERS + 8);
         let (lo, hi) = Self::bracket_maximum(start_y, MAX_INPUT_AMOUNT, |input_y| {
             let output_x = amm.quote_buy_x(input_y);
@@ -194,23 +217,19 @@ impl Arbitrageur {
             return None;
         }
 
-        let output_x = amm.execute_buy_x(optimal_y);
-        if output_x <= 0.0 {
-            return None;
-        }
-
-        Some(ArbResult {
-            amm_buys_x: false,
-            amount_x: output_x,
-            amount_y: optimal_y,
-            edge: optimal_y - output_x * fair_price,
+        Some(ArbCandidate {
+            side: ArbSide::BuyX,
+            input_amount: optimal_y,
+            expected_profit: arb_profit,
         })
     }
 
-    fn arb_sell_x(&mut self, amm: &mut BpfAmm, fair_price: f64) -> Option<ArbResult> {
-        let start_x = (self.sample_retail_size_y() / fair_price.max(1e-9))
-            .max(MIN_INPUT)
-            .min(MAX_INPUT_AMOUNT);
+    fn plan_arb_sell_x(
+        &mut self,
+        amm: &mut BpfAmm,
+        fair_price: f64,
+        start_x: f64,
+    ) -> Option<ArbCandidate> {
         let mut sampled_curve = Vec::with_capacity(BRACKET_MAX_STEPS + GOLDEN_MAX_ITERS + 8);
         let (lo, hi) = Self::bracket_maximum(start_x, MAX_INPUT_AMOUNT, |input_x| {
             let output_y = amm.quote_sell_x(input_x);
@@ -243,17 +262,63 @@ impl Arbitrageur {
             return None;
         }
 
-        let output_y = amm.execute_sell_x(optimal_x);
-        if output_y <= 0.0 {
-            return None;
-        }
-
-        Some(ArbResult {
-            amm_buys_x: true,
-            amount_x: optimal_x,
-            amount_y: output_y,
-            edge: optimal_x * fair_price - output_y,
+        Some(ArbCandidate {
+            side: ArbSide::SellX,
+            input_amount: optimal_x,
+            expected_profit: arb_profit,
         })
+    }
+
+    fn best_candidate(
+        buy: Option<ArbCandidate>,
+        sell: Option<ArbCandidate>,
+    ) -> Option<ArbCandidate> {
+        match (buy, sell) {
+            (Some(buy), Some(sell)) => {
+                if sell.expected_profit > buy.expected_profit {
+                    Some(sell)
+                } else {
+                    Some(buy)
+                }
+            }
+            (Some(buy), None) => Some(buy),
+            (None, Some(sell)) => Some(sell),
+            (None, None) => None,
+        }
+    }
+
+    fn execute_candidate(
+        &self,
+        amm: &mut BpfAmm,
+        fair_price: f64,
+        candidate: ArbCandidate,
+    ) -> Option<ArbResult> {
+        match candidate.side {
+            ArbSide::BuyX => {
+                let output_x = amm.execute_buy_x(candidate.input_amount);
+                if output_x <= 0.0 {
+                    return None;
+                }
+                Some(ArbResult {
+                    amm_buys_x: false,
+                    amount_x: output_x,
+                    amount_y: candidate.input_amount,
+                    edge: candidate.input_amount - output_x * fair_price,
+                })
+            }
+            ArbSide::SellX => {
+                let output_y = amm.execute_sell_x(candidate.input_amount);
+                if output_y <= 0.0 {
+                    return None;
+                }
+                Some(ArbResult {
+                    amm_buys_x: true,
+                    amount_x: candidate.input_amount,
+                    amount_y: output_y,
+                    edge: candidate.input_amount * fair_price - output_y,
+                })
+            }
+        }
     }
 
     fn bracket_maximum<F>(start: f64, max_input: f64, mut objective: F) -> (f64, f64)
@@ -395,8 +460,49 @@ mod tests {
     use crate::amm::BpfAmm;
     use prop_amm_shared::normalizer::compute_swap as normalizer_swap;
 
+    const NANO_SCALE: f64 = 1_000_000_000.0;
+
     fn test_amm() -> BpfAmm {
         BpfAmm::new_native(normalizer_swap, None, 100.0, 10_000.0, "test".to_string())
+    }
+
+    fn to_nano_u64(amount: f64) -> u64 {
+        if !amount.is_finite() || amount <= 0.0 {
+            return 0;
+        }
+        let scaled = (amount * NANO_SCALE).floor();
+        if scaled <= 0.0 {
+            0
+        } else if scaled >= u64::MAX as f64 {
+            u64::MAX
+        } else {
+            scaled as u64
+        }
+    }
+
+    fn linear_quote_swap(data: &[u8], buy_price: f64, sell_price: f64) -> u64 {
+        if data.len() < 25 {
+            return 0;
+        }
+        let side = data[0];
+        let input = u64::from_le_bytes(data[1..9].try_into().expect("input")) as f64 / NANO_SCALE;
+        if !input.is_finite() || input <= 0.0 {
+            return 0;
+        }
+        let output = match side {
+            0 => input / buy_price,
+            1 => input * sell_price,
+            _ => 0.0,
+        };
+        to_nano_u64(output)
+    }
+
+    fn fixed_price_120_swap(data: &[u8]) -> u64 {
+        linear_quote_swap(data, 120.0, 120.0)
+    }
+
+    fn crossed_price_swap(data: &[u8]) -> u64 {
+        linear_quote_swap(data, 99.0, 120.0)
     }
 
     #[test]
@@ -419,6 +525,62 @@ mod tests {
         assert!(
             floor.execute_arb(&mut amm_with_floor, fair_price).is_none(),
             "trade should be skipped when profit ({realized_profit}) is below threshold"
+        );
+    }
+
+    #[test]
+    fn explores_opposite_side_when_reserve_spot_direction_is_wrong() {
+        let fair_price = 100.5;
+        let mut amm = BpfAmm::new_native(
+            fixed_price_120_swap,
+            None,
+            100.0,
+            10_000.0,
+            "test".to_string(),
+        );
+        assert!(
+            amm.spot_price() < fair_price * 0.9999,
+            "reserve spot should suggest buy-X under legacy gating"
+        );
+
+        let buy_probe_profit = amm.quote_buy_x(20.0) * fair_price - 20.0;
+        let sell_probe_profit = amm.quote_sell_x(0.2) - 0.2 * fair_price;
+        assert!(buy_probe_profit < 0.0, "buy side should be unprofitable");
+        assert!(sell_probe_profit > 0.0, "sell side should be profitable");
+
+        let mut arb = Arbitrageur::new(0.01, 20.0, 1.2, 7);
+        let result = arb
+            .execute_arb(&mut amm, fair_price)
+            .expect("arb should execute profitable sell-X trade");
+        assert!(result.amm_buys_x, "trade should be sell-X (AMM buys X)");
+    }
+
+    #[test]
+    fn chooses_higher_profit_side_when_both_are_profitable() {
+        let fair_price = 100.5;
+        let mut amm = BpfAmm::new_native(
+            crossed_price_swap,
+            None,
+            100.0,
+            10_000.0,
+            "test".to_string(),
+        );
+        let buy_probe_profit = amm.quote_buy_x(20.0) * fair_price - 20.0;
+        let sell_probe_profit = amm.quote_sell_x(0.2) - 0.2 * fair_price;
+        assert!(buy_probe_profit > 0.0, "buy side should be profitable");
+        assert!(sell_probe_profit > 0.0, "sell side should be profitable");
+        assert!(
+            sell_probe_profit > buy_probe_profit,
+            "sell side should be clearly more profitable"
+        );
+
+        let mut arb = Arbitrageur::new(0.01, 20.0, 1.2, 17);
+        let result = arb
+            .execute_arb(&mut amm, fair_price)
+            .expect("arb should execute one of the profitable trades");
+        assert!(
+            result.amm_buys_x,
+            "arb should choose sell-X side with higher expected profit"
         );
     }
 }
