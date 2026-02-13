@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const BUILD_DIR: &str = ".build";
+const FORBID_UNSAFE: &str = "#![forbid(unsafe_code)]\n";
 
 const CARGO_TOML: &str = r#"[package]
 name = "user_program"
@@ -14,6 +15,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 pinocchio = "0.7"
 wincode = { version = "0.4", default-features = false, features = ["derive"] }
+prop-amm-submission-sdk = { path = "../crates/submission-sdk" }
 
 [features]
 no-entrypoint = []
@@ -42,7 +44,7 @@ pub fn compile_native(rs_file: &str) -> anyhow::Result<PathBuf> {
     }
 
     let build_dir = ensure_build_dir()?;
-    std::fs::copy(rs_path, build_dir.join("src/lib.rs"))?;
+    write_safe_submission_source(rs_path, &build_dir)?;
 
     let status = Command::new("cargo")
         .arg("build")
@@ -67,7 +69,7 @@ pub fn compile_bpf(rs_file: &str) -> anyhow::Result<PathBuf> {
     }
 
     let build_dir = ensure_build_dir()?;
-    std::fs::copy(rs_path, build_dir.join("src/lib.rs"))?;
+    write_safe_submission_source(rs_path, &build_dir)?;
 
     let status = Command::new("cargo")
         .arg("build-sbf")
@@ -106,6 +108,21 @@ fn find_native_lib(build_dir: &Path) -> anyhow::Result<PathBuf> {
     )
 }
 
+fn write_safe_submission_source(rs_path: &Path, build_dir: &Path) -> anyhow::Result<()> {
+    let source = std::fs::read_to_string(rs_path)?;
+    let output = if source.starts_with(FORBID_UNSAFE) {
+        source
+    } else {
+        let mut wrapped = String::with_capacity(FORBID_UNSAFE.len() + source.len());
+        wrapped.push_str(FORBID_UNSAFE);
+        wrapped.push_str(&source);
+        wrapped
+    };
+
+    std::fs::write(build_dir.join("src/lib.rs"), output)?;
+    Ok(())
+}
+
 fn find_bpf_so(build_dir: &Path) -> anyhow::Result<PathBuf> {
     let deploy_dir = build_dir.join("target").join("deploy");
 
@@ -119,8 +136,5 @@ fn find_bpf_so(build_dir: &Path) -> anyhow::Result<PathBuf> {
         }
     }
 
-    anyhow::bail!(
-        "No BPF .so found in {}/target/deploy/",
-        build_dir.display()
-    )
+    anyhow::bail!("No BPF .so found in {}/target/deploy/", build_dir.display())
 }
