@@ -15,6 +15,7 @@ crate-type = ["cdylib", "lib"]
 [dependencies]
 pinocchio = "0.7"
 wincode = { version = "0.4", default-features = false, features = ["derive"] }
+prop-amm-submission-sdk = { path = "../crates/submission-sdk" }
 
 [features]
 no-entrypoint = []
@@ -135,8 +136,5 @@ fn find_bpf_so(build_dir: &Path) -> anyhow::Result<PathBuf> {
         }
     }
 
-    anyhow::bail!(
-        "No BPF .so found in {}/target/deploy/",
-        build_dir.display()
-    )
+    anyhow::bail!("No BPF .so found in {}/target/deploy/", build_dir.display())
 }
