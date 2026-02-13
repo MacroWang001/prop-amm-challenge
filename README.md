@@ -1,5 +1,7 @@
 # Prop AMM Challenge
 
+**https://ammchallenge.com/prop-amm**
+
 Design a custom price function for an automated market maker. Your goal: maximize **edge** — the profit your AMM extracts from trading flow.
 
 Your program runs inside a simulation against a benchmark AMM. Retail traders arrive, arbitrageurs keep prices efficient, and an order router splits flow between the two pools based on who offers better prices. The better your pricing, the more flow you attract and the more edge you earn.
