@@ -156,6 +156,8 @@ use prop_amm_submission_sdk::{set_return_data_bytes, set_return_data_u64};
 const NAME: &str = "My Strategy";
 const MODEL_USED: &str = "GPT-5.3-Codex"; // Use "None" for human-written submissions.
 
+const FEE_NUMERATOR: u128 = 950;
+const FEE_DENOMINATOR: u128 = 1000;
 const STORAGE_SIZE: usize = 1024;
 
 #[derive(wincode::SchemaRead)]
@@ -164,7 +166,7 @@ struct ComputeSwapInstruction {
     input_amount: u64,
     reserve_x: u64,
     reserve_y: u64,
-    storage: [u8; STORAGE_SIZE],
+    _storage: [u8; STORAGE_SIZE],
 }
 
 #[cfg(not(feature = "no-entrypoint"))]
@@ -200,14 +202,35 @@ pub fn compute_swap(data: &[u8]) -> u64 {
         Ok(decoded) => decoded,
         Err(_) => return 0,
     };
-    let side = decoded.side;
-    let input = decoded.input_amount as u128;
-    let rx = decoded.reserve_x as u128;
-    let ry = decoded.reserve_y as u128;
-    let _storage = decoded.storage;
 
-    // Your pricing logic here...
-    todo!()
+    let side = decoded.side;
+    let input_amount = decoded.input_amount as u128;
+    let reserve_x = decoded.reserve_x as u128;
+    let reserve_y = decoded.reserve_y as u128;
+
+    if reserve_x == 0 || reserve_y == 0 {
+        return 0;
+    }
+
+    let k = reserve_x * reserve_y;
+
+    match side {
+        0 => {
+            // Buy X: input is Y, output is X
+            let net_y = input_amount * FEE_NUMERATOR / FEE_DENOMINATOR;
+            let new_ry = reserve_y + net_y;
+            let k_div = (k + new_ry - 1) / new_ry;
+            reserve_x.saturating_sub(k_div) as u64
+        }
+        1 => {
+            // Sell X: input is X, output is Y
+            let net_x = input_amount * FEE_NUMERATOR / FEE_DENOMINATOR;
+            let new_rx = reserve_x + net_x;
+            let k_div = (k + new_rx - 1) / new_rx;
+            reserve_y.saturating_sub(k_div) as u64
+        }
+        _ => 0,
+    }
 }
 
 /// Optional native hook for local testing.
